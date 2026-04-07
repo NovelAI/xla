@@ -292,6 +292,15 @@ cc_library(
 )
 
 cc_library(
+    name = "pjrt_c_api_gpu_autotune_extension_hdrs",
+    hdrs = ["pjrt_c_api_gpu_autotune_extension.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pjrt_c_api_hdrs",
+    ],
+)
+
+cc_library(
     name = "pjrt_c_api_stream_extension_hdrs",
     hdrs = ["pjrt_c_api_stream_extension.h"],
     visibility = ["//visibility:public"],
@@ -643,6 +652,7 @@ cc_library(
         ":pjrt_c_api_custom_partitioner_extension_hdrs",
         ":pjrt_c_api_ffi_extension_hdrs",
         ":pjrt_c_api_ffi_internal",
+        ":pjrt_c_api_gpu_autotune_extension_hdrs",
         ":pjrt_c_api_gpu_extension_hdrs",
         ":pjrt_c_api_hdrs",
         ":pjrt_c_api_helpers",
@@ -689,6 +699,7 @@ cc_library(
         "//xla/service:custom_call_target_registry",
         "//xla/service:gpu_topology",
         "//xla/service/cpu:executable_proto_cc",
+        "//xla/service/gpu/autotuning:autotuner_cache",
         "//xla/stream_executor:stream_executor_h",
         "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
