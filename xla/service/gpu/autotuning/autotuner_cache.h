@@ -36,6 +36,14 @@ using AutotuneNoCacheFn = std::function<absl::StatusOr<AutotuneResult>()>;
 
 class AutotunerCache {
  public:
+  // Selects which cache entries SerializeAutotuneResults should emit. A scoped
+  // enum (rather than a bool) so the parameter can never be confused with the
+  // pointer/bool arguments of the other SerializeAutotuneResults overloads.
+  enum class SerializeFilter {
+    kAll,       // All entries currently in the cache.
+    kUsedOnly,  // Only entries used this run (see SerializeAutotuneResults).
+  };
+
   // Used in the new autotuner to provide current cache compatibility.
   static absl::StatusOr<std::optional<AutotuneResult>> TryFindInCache(
       const AutotuneCacheKey& key, absl::string_view cache_dir);
@@ -96,8 +104,15 @@ class AutotunerCache {
   // dots/convs it wants to run can also change.  For example, XLA might change
   // the conv padding heuristics it uses, and we don't want that to mean that
   // all users of ahead-of-time autotuning are broken.
+  //
+  // If `filter` is SerializeFilter::kUsedOnly, serializes only the entries that
+  // were actually used during this run (freshly autotuned, loaded from the
+  // file-based cache, or looked up after being loaded), excluding entries that
+  // were bulk-loaded via LoadAutotuneResults (the Python `load_autotune_results`
+  // API or the `--xla_gpu_load_autotune_results_from=` flag) but never read.
   static absl::StatusOr<std::string> SerializeAutotuneResults(
-      bool as_textproto = false);
+      bool as_textproto = false,
+      SerializeFilter filter = SerializeFilter::kAll);
 
   // Serializes autotune results into the given proto. If optional keys are
   // provided, serializes results only for these keys.

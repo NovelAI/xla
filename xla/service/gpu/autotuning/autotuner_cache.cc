@@ -70,6 +70,15 @@ using ResultAndInserted = AutotunerCache::ResultAndInserted;
 static absl::Mutex autotune_cache_mu(absl::kConstInit);
 static auto& autotune_cache ABSL_GUARDED_BY(autotune_cache_mu) =
     *new AutotuneCacheMap();
+// Keys whose results were actually used during this run: either freshly
+// autotuned, loaded from the file-based per-fusion cache (which only happens on
+// a lookup), or looked up after being loaded. Entries inserted by a bulk load
+// (`LoadAutotuneResults`, used by both the Python `load_autotune_results` API
+// and the `--xla_gpu_load_autotune_results_from=` flag) are deliberately *not*
+// recorded here until they are looked up. Used to implement `only_used`
+// serialization.
+static auto& autotune_cache_used ABSL_GUARDED_BY(autotune_cache_mu) =
+    *new AutotuneCacheKeySet();
 
 absl::StatusOr<std::string> GetBase64EncodedSha256Hash(absl::string_view s) {
   llvm::SHA256 sha256;
@@ -100,6 +109,9 @@ ResultAndInserted AddResultToInMemoryCache(const AutotuneCacheKey& key,
     ABSL_LOCKS_EXCLUDED(autotune_cache_mu) {
   absl::MutexLock lock(autotune_cache_mu);
   auto [it, inserted] = autotune_cache.emplace(key, std::move(result));
+  // A result reaches this path when it is freshly autotuned or loaded from the
+  // file-based cache on a lookup; in both cases it is being used this run.
+  autotune_cache_used.insert(key);
   return {it->second, inserted};
 }
 
@@ -153,6 +165,8 @@ std::optional<AutotuneResult> TryToFindInInMemoryCache(
   if (it == autotune_cache.end()) {
     return std::nullopt;
   }
+  // Record that this (possibly loaded) entry was actually read this run.
+  autotune_cache_used.insert(key);
   return it->second;
 }
 
@@ -263,6 +277,7 @@ void SerializeAutotuneEntry(AutotuneResults* results, const AutotuneCacheKey& k,
 /*static*/ void AutotunerCache::ClearAutotuneResults() {
   absl::MutexLock lock(autotune_cache_mu);
   autotune_cache.clear();
+  autotune_cache_used.clear();
 }
 
 /*static*/ bool AutotunerCache::ResultCacheIsEmpty() {
@@ -365,9 +380,21 @@ bool IsTextProtoPath(absl::string_view file_path) {
 }
 
 /*static*/ absl::StatusOr<std::string> AutotunerCache::SerializeAutotuneResults(
-    bool as_textproto) {
+    bool as_textproto, AutotunerCache::SerializeFilter filter) {
   AutotuneResults results;
-  RETURN_IF_ERROR(SerializeAutotuneResults(&results));
+  if (filter == SerializeFilter::kUsedOnly) {
+    // Copy the used-key set under the lock, then serialize filtering by it. The
+    // keyset-filtering overload re-acquires the lock, so we must not hold it
+    // here.
+    AutotuneCacheKeySet used;
+    {
+      absl::MutexLock lock(autotune_cache_mu);
+      used = autotune_cache_used;
+    }
+    RETURN_IF_ERROR(SerializeAutotuneResults(&results, &used));
+  } else {
+    RETURN_IF_ERROR(SerializeAutotuneResults(&results));
+  }
   return AutotuneResultsToString(results, as_textproto);
 }
 

@@ -570,8 +570,11 @@ PJRT_Error* PJRT_Gpu_Autotune_Serialize_Impl(
       "PJRT_Gpu_Autotune_Serialize_Args",
       PJRT_Gpu_Autotune_Serialize_Args_STRUCT_SIZE, args->struct_size));
   static std::string serialized;
-  auto result =
-      xla::gpu::AutotunerCache::SerializeAutotuneResults(args->as_textproto);
+  auto result = xla::gpu::AutotunerCache::SerializeAutotuneResults(
+      args->as_textproto,
+      args->only_used
+          ? xla::gpu::AutotunerCache::SerializeFilter::kUsedOnly
+          : xla::gpu::AutotunerCache::SerializeFilter::kAll);
   if (!result.ok()) {
     return new PJRT_Error{result.status()};
   }

@@ -30,8 +30,9 @@ struct PJRT_Gpu_Autotune_Serialize_Args {
   bool as_textproto;     // in
   const char* out_data;  // out, valid until next serialize call
   size_t out_size;       // out
+  bool only_used;        // in: serialize only entries used this run
 };
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_Gpu_Autotune_Serialize_Args, out_size);
+PJRT_DEFINE_STRUCT_TRAITS(PJRT_Gpu_Autotune_Serialize_Args, only_used);
 
 typedef PJRT_Error* PJRT_Gpu_Autotune_Serialize(
     PJRT_Gpu_Autotune_Serialize_Args* args);
