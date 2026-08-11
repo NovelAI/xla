@@ -204,7 +204,8 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
 
   ASSIGN_OR_RETURN(
       std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
-      GetOrCreateCommandBuffer(params.executor, *params.buffer_allocations));
+      GetOrCreateCommandBuffer(params.executor, params.stream,
+                               *params.buffer_allocations));
   absl::MutexLock lock(cmd_buffer->mutex);
 
   // If there are no thunks, or command buffer does not require warmup,
@@ -300,7 +301,8 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
   se::StreamExecutor* executor = params.stream->parent();
   ASSIGN_OR_RETURN(
       std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
-      GetOrCreateCommandBuffer(executor, *params.buffer_allocations));
+      GetOrCreateCommandBuffer(executor, params.stream,
+                               *params.buffer_allocations));
 
   absl::MutexLock lock(cmd_buffer->mutex);
 
@@ -383,7 +385,8 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
 
 absl::StatusOr<std::shared_ptr<CommandBufferThunk::ExecutorCommandBuffer>>
 CommandBufferThunk::GetOrCreateCommandBuffer(
-    se::StreamExecutor* executor, const BufferAllocations& buffer_allocations) {
+    se::StreamExecutor* executor, se::Stream* stream,
+    const BufferAllocations& buffer_allocations) {
   void* first_alloc_address = nullptr;
   if (command_buffer_update_mode_ == DebugOptions::NEVER_UPDATE &&
       !allocs_indices().empty()) {
@@ -409,7 +412,7 @@ CommandBufferThunk::GetOrCreateCommandBuffer(
               .opaque();
     }
   }
-  auto key = std::make_pair(executor, first_alloc_address);
+  auto key = std::make_tuple(executor, first_alloc_address, stream);
   absl::MutexLock lock(state_->mutex);
   // Check if command buffer already exists
   if (auto it = state_->command_buffers.find(key);
@@ -428,7 +431,10 @@ CommandBufferThunk::GetOrCreateCommandBuffer(
   // executor rather than the total map size.
   size_t count_for_executor = std::count_if(
       state_->command_buffers.begin(), state_->command_buffers.end(),
-      [executor](const auto& entry) { return entry.first.first == executor; });
+      [executor, stream](const auto& entry) {
+        return std::get<0>(entry.first) == executor &&
+               std::get<2>(entry.first) == stream;
+      });
   DCHECK_LE(count_for_executor, static_cast<size_t>(2))
       << "command_buffers map has more entries than expected VA reservation "
       << "sets for executor " << executor;

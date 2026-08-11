@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -39,6 +40,7 @@ limitations under the License.
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/xla.pb.h"
 
@@ -142,19 +144,22 @@ class CommandBufferThunk : public Thunk {
   // Command buffer thunk owns commands buffers instantiated on all executors.
   // When VA remapping is enabled, the key includes the first allocation's VA
   // address to distinguish between command buffers for different VA ranges.
+  // The key also includes the execution stream so that concurrent executions
+  // on different streams never share (and serialize on) one instantiated
+  // command buffer.
   struct State {
     absl::Mutex mutex;
-    absl::flat_hash_map<std::pair<se::StreamExecutor*, void*>,
+    absl::flat_hash_map<std::tuple<se::StreamExecutor*, void*, se::Stream*>,
                         std::shared_ptr<ExecutorCommandBuffer>>
         command_buffers ABSL_GUARDED_BY(mutex);
   };
 
-  // Returns a command buffer for (executor, buffer_allocations) or creates a
-  // new one. When VA remapping is enabled the key includes the first
+  // Returns a command buffer for (executor, stream, buffer_allocations) or
+  // creates a new one. When VA remapping is enabled the key includes the first
   // allocation's device address to distinguish per-VA-range command buffers;
   // otherwise the key uses nullptr.
   absl::StatusOr<std::shared_ptr<ExecutorCommandBuffer>>
-  GetOrCreateCommandBuffer(se::StreamExecutor* executor,
+  GetOrCreateCommandBuffer(se::StreamExecutor* executor, se::Stream* stream,
                            const BufferAllocations& buffer_allocations);
 
   // Each individual command buffer allocates state on device (CUDA graph) and
