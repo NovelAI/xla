@@ -112,7 +112,7 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_Extension_Base, next);
 // Changes include:
 // * Adding a new field to the PJRT_Api or argument structs
 // * Renaming a method or argument (doesn't affect ABI)
-#define PJRT_API_MINOR 112
+#define PJRT_API_MINOR 113
 
 // The plugin should set the major_version and minor_version of
 // PJRT_Api.pjrt_api_version to be the `PJRT_API_MAJOR` and `PJRT_API_MINOR` in
@@ -2031,8 +2031,12 @@ struct PJRT_ExecuteOptions {
   // replicas and partitions, so this is a flat span. Must outlive execution.
   PJRT_HloOutputCallbackInfo* hlo_output_callbacks;
   size_t num_hlo_output_callbacks;
+  // Identifies the series of executions that must be executed in program
+  // order. Executions with different execution stream IDs may be executed in
+  // any order and concurrently.
+  int64_t execution_stream_id;
 };
-PJRT_DEFINE_STRUCT_TRAITS(PJRT_ExecuteOptions, num_hlo_output_callbacks);
+PJRT_DEFINE_STRUCT_TRAITS(PJRT_ExecuteOptions, execution_stream_id);
 
 struct PJRT_LoadedExecutable_Execute_Args {
   size_t struct_size;

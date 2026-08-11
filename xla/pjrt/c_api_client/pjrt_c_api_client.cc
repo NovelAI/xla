@@ -3330,6 +3330,9 @@ PjRtCApiLoadedExecutable::GetCommonExecuteArgs(
   if (pjrt_c_api()->pjrt_api_version.minor_version >= 76) {
     args.options->call_location = options.call_location.c_str();
   }
+  if (pjrt_c_api()->pjrt_api_version.minor_version >= 113) {
+    args.options->execution_stream_id = options.execution_stream_id;
+  }
 
   for (const auto& [task_id, incarnation_id] : options.incarnations) {
     task_ids_storage.push_back(task_id);

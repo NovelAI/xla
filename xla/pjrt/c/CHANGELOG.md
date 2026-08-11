@@ -1,5 +1,9 @@
 # PJRT C API changelog
 
+## 0.113
+
+*   Added execution_stream_id to PJRT_ExecuteOptions.
+
 ## 0.112
 
 *   Added PJRT_HloOutputCallbackInfo to PJRT_ExecuteOptions.

@@ -2357,6 +2357,10 @@ PJRT_Error* PJRT_LoadedExecutable_Execute(
           args->options->non_donatable_input_indices[i]);
     }
   }
+  if (args->options->struct_size >=
+      PJRT_STRUCT_SIZE(PJRT_ExecuteOptions, execution_stream_id)) {
+    options.execution_stream_id = args->options->execution_stream_id;
+  }
 
   for (size_t i = 0; i < args->options->num_tasks; ++i) {
     int task_id = args->options->task_ids[i];
