@@ -204,7 +204,19 @@ class StreamExecutorGpuClient : public xla::PjRtStreamExecutorClient {
   absl::StatusOr<std::unique_ptr<PjRtRuntimeAbiVersion>> RuntimeAbiVersion()
       const override;
 
+  void SetExecutionStreamAllocators(
+      std::vector<std::unique_ptr<se::DeviceAddressAllocator>> allocators) {
+    execution_stream_allocators_ = std::move(allocators);
+  }
+
+  ExecutionStreamResources GetExecutionStreamResources(
+      LocalDeviceState* device_state, int64_t execution_stream_id,
+      LocalExecutable* executable) override;
+
  private:
+  std::vector<std::unique_ptr<se::DeviceAddressAllocator>>
+      execution_stream_allocators_;
+
   absl::flat_hash_map<GlobalDeviceId, IncarnationId> GetLatestIncarnations(
       const ExecuteOptions& options);
 

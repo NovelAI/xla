@@ -189,6 +189,7 @@ LocalDeviceState::~LocalDeviceState() {
     }
   }
   host_to_device_stream_.reset();
+  execution_streams_.clear();
   compute_stream_.reset();
 
   // 3. Join callback/cleanup threads to execute all pending tasks.
@@ -199,6 +200,16 @@ LocalDeviceState::~LocalDeviceState() {
   compute_events_.clear();
 }
 
+absl::Status LocalDeviceState::EnsureExecutionStreams(int count) {
+  execution_streams_.reserve(count);
+  for (int i = execution_streams_.size(); i < count; ++i) {
+    ASSIGN_OR_RETURN(auto stream, executor_->CreateStream());
+    stream->SetName(absl::StrFormat("Execution #%d", i));
+    execution_streams_.emplace_back(std::move(stream));
+  }
+  return absl::OkStatus();
+}
+
 absl::Status LocalDeviceState::SynchronizeAllActivity() {
   absl::Status status;
   // TODO(phawkins): in theory the call to SynchronizeAllActivity below should
@@ -207,6 +218,9 @@ absl::Status LocalDeviceState::SynchronizeAllActivity() {
   // stopped, also block on the compute stream. If SynchronizeAllActivity is
   // fixed, we could remove the BlockHostUntilDone call.
   status.Update(compute_stream_->BlockHostUntilDone());
+  for (auto& stream : execution_streams_) {
+    status.Update(stream->BlockHostUntilDone());
+  }
   if (callback_stream_map_.has_value()) {
     absl::MutexLock lock(callback_stream_map_mu_);
     for (auto& callback_stream : callback_stream_map_.value()) {

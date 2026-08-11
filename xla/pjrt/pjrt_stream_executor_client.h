@@ -363,6 +363,20 @@ class PjRtStreamExecutorClient : public CommonPjRtClient {
     return gpu_run_options_.get();
   }
 
+  struct ExecutionStreamResources {
+    se::Stream* stream;
+    se::DeviceAddressAllocator* allocator;
+  };
+
+  // Resolves the stream and allocator an execution with the given
+  // execution_stream_id runs with. The default implementation ignores the id
+  // and uses the device's compute stream and the client allocator.
+  virtual ExecutionStreamResources GetExecutionStreamResources(
+      LocalDeviceState* device_state, int64_t execution_stream_id,
+      LocalExecutable* executable) {
+    return {device_state->compute_stream(), allocator()};
+  }
+
   virtual absl::StatusOr<PjRtStreamExecutorExecutionOutput> RunAsync(
       LocalExecutable& exec, PjRtDevice* device,
       absl::Span<const PjRtRawBufferRef> flat_arguments,

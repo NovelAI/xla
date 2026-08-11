@@ -1021,6 +1021,39 @@ absl::Status BarrierAfterExecutable(
               : 30));
 }
 
+bool GpuExecutable::IsMultiStreamSafe() {
+  absl::call_once(multi_stream_safe_once_, [this] {
+    bool safe = true;
+    for (const std::unique_ptr<Thunk>& root : thunk_executor_->thunks()) {
+      root->Walk([&safe](const Thunk* thunk) {
+        switch (thunk->kind()) {
+          case Thunk::kDynamicSlice:
+          case Thunk::kDynamicSliceFusion:
+          case Thunk::kHostExecuteDone:
+          case Thunk::kHostExecuteStart:
+          case Thunk::kHostRecv:
+          case Thunk::kHostRecvDone:
+          case Thunk::kHostSend:
+          case Thunk::kHostSendDone:
+          case Thunk::kInfeed:
+          case Thunk::kOutfeed:
+          case Thunk::kRecv:
+          case Thunk::kSend:
+            safe = false;
+            break;
+          default:
+            if (thunk->IsCollective()) {
+              safe = false;
+            }
+            break;
+        }
+      });
+    }
+    multi_stream_safe_ = safe;
+  });
+  return multi_stream_safe_;
+}
+
 absl::StatusOr<const GpuExecutable::BufferAllocToDeviceMemoryMap*>
 GpuExecutable::ResolveConstantGlobals(se::Stream* stream) {
   se::StreamExecutor* executor = stream->parent();

@@ -1818,8 +1818,14 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
   int command_buffer_va_range_idx =
       GetNextCommandBufferVaRangeIdx(executable_->executable(), device_ordinal);
 
+  PjRtStreamExecutorClient::ExecutionStreamResources exec_resources =
+      client_->GetExecutionStreamResources(
+          device_state, options.execution_stream_id, executable_.get());
+
   auto launch_on_device =
-      [device_state, gpu_run_options = client_->gpu_run_options(options),
+      [device_state, exec_stream = exec_resources.stream,
+       exec_allocator = exec_resources.allocator,
+       gpu_run_options = client_->gpu_run_options(options),
        launch_id = options.launch_id, run_id = run_id_,
        command_buffer_va_range_idx, context = options.context, client = client_,
        device = device_, device_assignment = device_assignment_,
@@ -1837,7 +1843,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
        extra_deps = std::move(extra_deps),
        control_deps = std::move(control_deps)]() mutable -> PjRtDeviceEventRef {
     ExecutableRunOptions run_options;
-    run_options.set_stream(device_state->compute_stream());
+    run_options.set_stream(exec_stream);
     run_options.set_device_ordinal(device_state->local_device_id().value());
     run_options.set_local_device_count(client->client()->device_count());
 
@@ -1847,7 +1853,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
         device_state->host_to_device_stream());
     run_options.set_device_to_host_stream(
         device_state->GetDeviceToHostStream());
-    run_options.set_allocator(client->allocator());
+    run_options.set_allocator(exec_allocator);
     run_options.set_intra_op_thread_pool(
         client->client()->backend().eigen_intra_op_thread_pool_device());
     run_options.set_device_assignment(device_assignment.get());
@@ -1876,7 +1882,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
             predetermined_error = ev->GetDefinedStatus();
           }
         }
-        ev->WaitForEventOnStream(device_state->compute_stream());
+        ev->WaitForEventOnStream(exec_stream);
       } else if (event) {
         xla::BlockUntilReady(event);
         if (auto error = event.GetErrorIfPresent()) {
@@ -1890,7 +1896,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
     for (size_t i = 0; i < control_deps.size(); ++i) {
       const auto& event = control_deps[i];
       if (auto ev = event.down_cast<BufferSequencingEvent>()) {
-        ev->WaitForEventOnStream(device_state->compute_stream());
+        ev->WaitForEventOnStream(exec_stream);
       } else if (event) {
         xla::BlockUntilReady(event);
       }
@@ -1912,13 +1918,13 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
     if (key.has_value()) {
       start_time_ns = std::make_shared<uint64_t>();
       auto status = device_state->ThenExecuteCallback(
-          device_state->compute_stream(),
+          exec_stream,
           [start_time_ns]() {
             *start_time_ns = tsl::Env::Default()->NowNanos();
           },
           nullptr, "RecordExecuteStart");
       if (!status.ok()) {
-        StallStreamOnError(device_state, device_state->compute_stream());
+        StallStreamOnError(device_state, exec_stream);
         LOG(ERROR) << "Problem registering Execute start time: " << status;
         *start_time_ns = tsl::Env::Default()->NowNanos();
       }
@@ -1988,7 +1994,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
     // the stream, and to avoid needing a mutex.
     if (key.has_value()) {
       auto status = device_state->ThenExecuteCallback(
-          device_state->compute_stream(),
+          exec_stream,
           [key, start_time_ns,
            device_type = GetDeviceType(client->platform_id())]() {
             auto elapsed =
@@ -1999,7 +2005,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
           nullptr, "RecordExecuteFinish");
       if (!status.ok()) {
         LOG(ERROR) << "Error logging device time.";
-        StallStreamOnError(device_state, device_state->compute_stream());
+        StallStreamOnError(device_state, exec_stream);
         auto device_type = GetDeviceType(client->platform_id());
         auto elapsed = absl::FromUnixNanos(tsl::Env::Default()->NowNanos()) -
                        absl::FromUnixNanos(*start_time_ns);
@@ -2016,7 +2022,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
 
     auto definition_event = [&]() -> PjRtDeviceEventRef {
       LocalDeviceState* device_state = &(client->device_state(device_ordinal));
-      se::Stream* stream = device_state->compute_stream();
+      se::Stream* stream = exec_stream;
 
       if (!result_buffer_or_status.ok()) {
         StallStreamOnError(device_state, stream);
@@ -2024,9 +2030,17 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
             add_error_context(result_buffer_or_status.status()));
       }
       absl::StatusOr<BufferSequencingEventRef> definition_event_or =
-          device_state->GetEventForComputeStreamSyncPoint(
-              device_state->GetNextComputeStreamSyncPoint(),
-              client->async_work_runner());
+          [&]() -> absl::StatusOr<BufferSequencingEventRef> {
+        if (exec_stream != device_state->compute_stream()) {
+          auto event = BufferSequencingEvent::Create(client->async_work_runner());
+          RETURN_IF_ERROR(client->AllocateAndRecordEvent(
+              event, device_state, exec_stream, "ExecutionStreamDone"));
+          return event;
+        }
+        return device_state->GetEventForComputeStreamSyncPoint(
+            device_state->GetNextComputeStreamSyncPoint(),
+            client->async_work_runner());
+      }();
       if (!definition_event_or.ok()) {
         StallStreamOnError(device_state, stream);
         return client->CreateErrorDeviceEvent(
@@ -2036,7 +2050,8 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
           kExecutableName, std::string(executable->executable()->name()));
       return PjRtDeviceEventRef(*std::move(definition_event_or));
     }();
-    if (device_state->allocation_model() == LocalDeviceState::kSynchronous &&
+    if ((device_state->allocation_model() == LocalDeviceState::kSynchronous ||
+         exec_stream != device_state->compute_stream()) &&
         result_buffer_or_status.ok()) {
       // If we used a transient tuple for the arguments we donated its root
       // table buffer. In that case, and/or if we donated any input buffers that

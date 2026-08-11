@@ -138,6 +138,20 @@ class LocalDeviceState {
     return host_to_device_stream_.get();
   }
 
+  // Creates `count` additional compute streams used to run executions with a
+  // non-zero ExecuteOptions::execution_stream_id concurrently with the main
+  // compute stream. Must be called before the device is used for execution;
+  // the stream vector is immutable afterwards.
+  absl::Status EnsureExecutionStreams(int count);
+
+  int num_execution_streams() const { return execution_streams_.size(); }
+
+  // Returns the `index`-th additional compute stream. `index` must be in
+  // [0, num_execution_streams()).
+  se::Stream* execution_stream(int index) const {
+    return execution_streams_.at(index).get();
+  }
+
   // Returns a device to host stream. Allocates streams in a round-robin fashion
   // amongst the available streams.
   se::Stream* GetDeviceToHostStream();
@@ -256,6 +270,7 @@ class LocalDeviceState {
   se::StreamExecutor* const executor_;
   LocalClient* const client_;
   std::unique_ptr<se::Stream> compute_stream_;
+  std::vector<std::unique_ptr<se::Stream>> execution_streams_;
   std::unique_ptr<se::Stream> host_to_device_stream_;
   std::vector<std::unique_ptr<se::Stream>> device_to_host_streams_;
   std::vector<std::unique_ptr<se::Stream>> device_to_device_streams_;
