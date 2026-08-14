@@ -336,12 +336,11 @@ class GpuExecutable : public Executable {
   // buffer with the user.
   std::unique_ptr<GpuAliasInfo> alias_info_;
 
-  ModuleAnnotations module_annotations_ = [this] {
-    if (has_module()) {
-      return ModuleAnnotations(module());
-    }
-    return ModuleAnnotations(module_name_);
-  }();
+  const ModuleAnnotations& EnsureModuleAnnotations() const;
+
+  mutable absl::Mutex module_annotations_mu_;
+  mutable std::optional<ModuleAnnotations> module_annotations_
+      ABSL_GUARDED_BY(module_annotations_mu_);
 
   int64_t debug_buffer_assignment_show_max_;
 

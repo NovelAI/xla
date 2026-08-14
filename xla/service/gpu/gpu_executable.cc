@@ -103,6 +103,7 @@ limitations under the License.
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "tsl/platform/random.h"
+#include "tsl/profiler/lib/nvtx_utils.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
 #include "tsl/profiler/lib/traceme.h"
 
@@ -227,6 +228,22 @@ static absl::Status RunThunkPasses(const DebugOptions& debug_options,
   }
 
   return absl::OkStatus();
+}
+
+namespace {
+bool AnnotationsAreCollected() {
+  return tsl::profiler::DefaultProfilerDomain() != nullptr ||
+         tsl::profiler::ScopedAnnotation::IsEnabled();
+}
+}  // namespace
+
+const ModuleAnnotations& GpuExecutable::EnsureModuleAnnotations() const {
+  absl::MutexLock lock(module_annotations_mu_);
+  if (!module_annotations_.has_value()) {
+    module_annotations_.emplace(has_module() ? ModuleAnnotations(module())
+                                             : ModuleAnnotations(module_name_));
+  }
+  return *module_annotations_;
 }
 
 absl::StatusOr<std::unique_ptr<GpuExecutable>> GpuExecutable::Create(
@@ -1097,8 +1114,13 @@ absl::Status GpuExecutable::ExecuteThunks(
   TF_RETURN_IF_ERROR(
       CheckCompatibilityWithServiceExecutableRunOptions(run_options));
 
-  ScopedAnnotation annotation([&] { return module_annotations_.top_level; });
-  ScopedModuleAnnotations module_annotations(&module_annotations_);
+  const ModuleAnnotations* annotations =
+      AnnotationsAreCollected() ? &EnsureModuleAnnotations() : nullptr;
+  std::optional<ScopedAnnotation> annotation;
+  if (annotations != nullptr) {
+    annotation.emplace([&] { return annotations->top_level; });
+  }
+  ScopedModuleAnnotations module_annotations(annotations);
 
   ModuleIdentifier unique_id = has_module() ? module().unique_id() : -1;
   Thunk::ExecutableSource executable_source = {text_, binary_,
