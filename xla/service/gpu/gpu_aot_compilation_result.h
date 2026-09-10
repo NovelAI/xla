@@ -20,10 +20,13 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/log/log.h"
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/compiler.h"
 #include "xla/service/executable.h"
@@ -44,14 +47,13 @@ namespace xla::gpu {
 // HLO.
 class GpuAotCompilationResult : public AotCompilationResult {
  public:
+  // The optimized HloModule is parsed lazily: the load path
+  // (LoadExecutable -> GpuExecutable::FromProto) parses its own copy and never
+  // asks for it, so eagerly deserializing it here doubled the HLO parse cost
+  // of every executable load.
   static absl::StatusOr<std::unique_ptr<GpuAotCompilationResult>> FromProto(
       GpuExecutableProto executable) {
-    TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> module,
-                        HloModule::CreateFromProtoWithConfig(
-                            executable.hlo_module_with_config()));
-
-    return absl::WrapUnique(
-        new GpuAotCompilationResult(std::move(executable), std::move(module)));
+    return absl::WrapUnique(new GpuAotCompilationResult(std::move(executable)));
   }
 
   absl::StatusOr<std::string> SerializeAsString() const final {
@@ -76,20 +78,38 @@ class GpuAotCompilationResult : public AotCompilationResult {
         stream_exec->GetPlatform()->Name(), symbol_resolver);
   }
 
-  const HloModule* optimized_module() const final { return hlo_module_.get(); };
+  const HloModule* optimized_module() const final {
+    return EnsureHloModule().get();
+  };
 
   std::shared_ptr<HloModule> shared_optimized_module() final {
-    return hlo_module_;
+    return EnsureHloModule();
   };
 
  private:
-  explicit GpuAotCompilationResult(GpuExecutableProto executable,
-                                   std::unique_ptr<HloModule> hlo_module)
-      : executable_(std::move(executable)),
-        hlo_module_(std::move(hlo_module)) {}
+  explicit GpuAotCompilationResult(GpuExecutableProto executable)
+      : executable_(std::move(executable)) {}
+
+  const std::shared_ptr<HloModule>& EnsureHloModule() const {
+    absl::MutexLock lock(hlo_module_mu_);
+    if (hlo_module_ == nullptr) {
+      absl::StatusOr<std::unique_ptr<HloModule>> module =
+          HloModule::CreateFromProtoWithConfig(
+              executable_.hlo_module_with_config());
+      if (module.ok()) {
+        hlo_module_ = *std::move(module);
+      } else {
+        LOG(ERROR) << "Failed to parse the optimized HLO module out of a "
+                      "GpuExecutableProto: "
+                   << module.status();
+      }
+    }
+    return hlo_module_;
+  }
 
   GpuExecutableProto executable_;
-  std::shared_ptr<HloModule> hlo_module_;
+  mutable absl::Mutex hlo_module_mu_;
+  mutable std::shared_ptr<HloModule> hlo_module_ ABSL_GUARDED_BY(hlo_module_mu_);
 };
 
 }  // namespace xla::gpu
