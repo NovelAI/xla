@@ -23,8 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/call_once.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
@@ -38,6 +40,68 @@ limitations under the License.
 
 namespace xla {
 namespace gpu {
+
+namespace {
+
+// Deserializing a cuDNN graph is expensive and the result depends only on the
+// serialized graph and the executor, so dropout-free thunks with the same
+// fingerprint (within one executable or across executables) share one
+// DnnGraph. The thunk's LazyDnnGraph slot is filled in place through a
+// forwarding wrapper rather than by swapping the shared_ptr, because
+// CuDnnCmd copies that shared_ptr at command-buffer conversion time, before
+// Initialize runs.
+class SharedDnnGraph : public se::dnn::DnnGraph {
+ public:
+  explicit SharedDnnGraph(std::shared_ptr<se::dnn::DnnGraph> graph)
+      : graph_(std::move(graph)) {}
+
+  absl::Status Prepare(se::dnn::DnnSupport& dnn,
+                       const se::EngineOptions& options) override {
+    return graph_->Prepare(dnn, options);
+  }
+  absl::Status Build(se::dnn::DnnSupport& dnn,
+                     std::optional<int64_t> plan_id) override {
+    return graph_->Build(dnn, plan_id);
+  }
+  absl::Status Execute(se::Stream& stream,
+                       absl::Span<se::DeviceAddressBase> operands,
+                       int64_t local_device_ordinal) const override {
+    return graph_->Execute(stream, operands, local_device_ordinal);
+  }
+  void InitDropoutState(int64_t local_device_count, int64_t seed,
+                        int64_t increment) override {
+    graph_->InitDropoutState(local_device_count, seed, increment);
+  }
+  absl::StatusOr<bool> SupportsExplicitCommandBufferConstruction()
+      const override {
+    return graph_->SupportsExplicitCommandBufferConstruction();
+  }
+  absl::Status PopulateOrUpdateRawCommandBuffer(
+      se::Stream& stream, absl::Span<se::DeviceAddressBase> operands,
+      RawCommandBufferHandle handle, bool do_update) override {
+    return graph_->PopulateOrUpdateRawCommandBuffer(stream, operands, handle,
+                                                    do_update);
+  }
+
+ private:
+  std::shared_ptr<se::dnn::DnnGraph> graph_;
+};
+
+absl::Mutex& SharedDnnGraphMutex() {
+  static absl::Mutex* mu = new absl::Mutex();
+  return *mu;
+}
+
+using SharedDnnGraphKey = std::pair<const se::StreamExecutor*, std::string>;
+using SharedDnnGraphMap =
+    absl::flat_hash_map<SharedDnnGraphKey, std::shared_ptr<se::dnn::DnnGraph>>;
+
+SharedDnnGraphMap& SharedDnnGraphs() {
+  static SharedDnnGraphMap* cache = new SharedDnnGraphMap();
+  return *cache;
+}
+
+}  // namespace
 
 CuDnnThunk::CuDnnThunk(std::string fingerprint, ThunkInfo thunk_info,
                        std::vector<BufferAllocation::Slice> args,
@@ -58,14 +122,34 @@ absl::Status CuDnnThunk::Initialize(const InitializeParams& params) {
   // them.
   se::dnn::DnnSupport* dnn = params.stream->parent()->AsDnn();
   absl::call_once(once_flag_, [&] {
+    // Graphs with dropout carry a per-graph RNG offset that advances on every
+    // execution, so sharing one across thunks would couple their random
+    // streams; those keep a private graph.
+    const bool shareable = !sdpa_dropout_seed_.has_value();
+    const SharedDnnGraphKey key(params.stream->parent(), fingerprint_);
+    if (shareable) {
+      absl::MutexLock lock(SharedDnnGraphMutex());
+      auto it = SharedDnnGraphs().find(key);
+      if (it != SharedDnnGraphs().end()) {
+        graph_->reset(new SharedDnnGraph(it->second));
+        std::string().swap(fingerprint_);
+        return;
+      }
+    }
     auto result = dnn->DeserializeGraph(
         *params.stream, params.src.dnn_compiled_graphs.at(fingerprint_));
     std::string().swap(fingerprint_);
     if (result.ok()) {
-      graph_->swap(*result);
-      if (sdpa_dropout_seed_.has_value()) {
+      if (!shareable) {
+        graph_->swap(*result);
         graph_->get()->InitDropoutState(params.local_device_count,
                                         *sdpa_dropout_seed_, 16);
+      } else {
+        std::shared_ptr<se::dnn::DnnGraph> shared = std::move(*result);
+        absl::MutexLock lock(SharedDnnGraphMutex());
+        auto [it, inserted] =
+            SharedDnnGraphs().emplace(key, std::move(shared));
+        graph_->reset(new SharedDnnGraph(it->second));
       }
     }
     ret = result.status();
