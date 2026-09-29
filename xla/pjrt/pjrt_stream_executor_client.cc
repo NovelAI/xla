@@ -1825,6 +1825,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
   auto launch_on_device =
       [device_state, exec_stream = exec_resources.stream,
        exec_allocator = exec_resources.allocator,
+       hold_buffers_until_done = exec_resources.hold_buffers_until_done,
        gpu_run_options = client_->gpu_run_options(options),
        launch_id = options.launch_id, run_id = run_id_,
        command_buffer_va_range_idx, context = options.context, client = client_,
@@ -2072,7 +2073,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
       }
     }
     if ((device_state->allocation_model() == LocalDeviceState::kSynchronous ||
-         exec_stream != device_state->compute_stream()) &&
+         hold_buffers_until_done) &&
         result_buffer_or_status.ok()) {
       // If we used a transient tuple for the arguments we donated its root
       // table buffer. In that case, and/or if we donated any input buffers that

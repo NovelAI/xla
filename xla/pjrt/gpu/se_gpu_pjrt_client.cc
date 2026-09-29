@@ -2053,7 +2053,8 @@ StreamExecutorGpuClient::GetExecutionStreamResources(
     LocalDeviceState* device_state, int64_t execution_stream_id,
     LocalExecutable* executable) {
   PjRtStreamExecutorClient::ExecutionStreamResources default_resources{
-      device_state->compute_stream(), allocator()};
+      device_state->compute_stream(), allocator(),
+      !execution_stream_allocators_.empty()};
   if (execution_stream_id == 0 || execution_stream_allocators_.empty() ||
       static_cast<size_t>(device_state->num_execution_streams()) <
           execution_stream_allocators_.size()) {
@@ -2067,7 +2068,7 @@ StreamExecutorGpuClient::GetExecutionStreamResources(
   size_t index = static_cast<uint64_t>(execution_stream_id) %
                  execution_stream_allocators_.size();
   return {device_state->execution_stream(index),
-          execution_stream_allocators_[index].get()};
+          execution_stream_allocators_[index].get(), true};
 }
 
 absl::StatusOr<PjRtStreamExecutorExecutionOutput>
