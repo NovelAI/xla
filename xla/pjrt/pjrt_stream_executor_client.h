@@ -366,6 +366,7 @@ class PjRtStreamExecutorClient : public CommonPjRtClient {
   struct ExecutionStreamResources {
     se::Stream* stream;
     se::DeviceAddressAllocator* allocator;
+    bool hold_buffers_until_done = false;
   };
 
   // Resolves the stream and allocator an execution with the given
@@ -374,7 +375,7 @@ class PjRtStreamExecutorClient : public CommonPjRtClient {
   virtual ExecutionStreamResources GetExecutionStreamResources(
       LocalDeviceState* device_state, int64_t execution_stream_id,
       LocalExecutable* executable) {
-    return {device_state->compute_stream(), allocator()};
+    return {device_state->compute_stream(), allocator(), false};
   }
 
   virtual absl::StatusOr<PjRtStreamExecutorExecutionOutput> RunAsync(

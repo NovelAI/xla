@@ -199,12 +199,14 @@ GpuCudaMallocAsyncAllocator::GpuCudaMallocAsyncAllocator(
   VLOG(1) << Name() << " CudaMallocAsync initialized on platform: "
           << platform_device_id.value() << " with pool size of: " << pool_size
           << " this ptr: " << this;
-  uint64_t release_threshold_64 = reserve_memory_size;
-  if (auto status = cuMemPoolSetAttribute(cuda_state_->pool,
-                                          CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
-                                          &release_threshold_64))
-    LOG(FATAL) <<  // Crash OK.
-        "Failed to set CUDA pool attribute: " << cuda::ToStatus(status);
+  if (create_new_pool_ || reserve_memory_size > 0) {
+    uint64_t release_threshold_64 = reserve_memory_size;
+    if (auto status = cuMemPoolSetAttribute(cuda_state_->pool,
+                                            CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                                            &release_threshold_64))
+      LOG(FATAL) <<  // Crash OK.
+          "Failed to set CUDA pool attribute: " << cuda::ToStatus(status);
+  }
 
   if (compute_stats) {
     stats_ = std::make_unique<tsl::AllocatorStats>();
