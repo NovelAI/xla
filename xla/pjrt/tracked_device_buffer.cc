@@ -15,15 +15,25 @@ limitations under the License.
 
 #include "xla/pjrt/tracked_device_buffer.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/functional/any_invocable.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "xla/future.h"
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
 #include "xla/pjrt/async_work_runner.h"
@@ -46,8 +56,72 @@ limitations under the License.
 #include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/threadpool.h"
 #include "tsl/platform/casts.h"
+#include "tsl/platform/stacktrace.h"
 
 namespace xla {
+
+namespace buffer_lifetime_check {
+namespace {
+
+struct Registry {
+  absl::Mutex mu;
+  absl::flat_hash_map<std::pair<const void*, int>, se::Stream*> streams
+      ABSL_GUARDED_BY(mu);
+};
+
+Registry& GetRegistry() {
+  static auto* registry = new Registry();
+  return *registry;
+}
+
+std::atomic<int64_t> violations{0};
+
+se::Stream* HomeStream(const se::DeviceAddressAllocator* allocator,
+                       int device_ordinal) {
+  Registry& r = GetRegistry();
+  absl::MutexLock lock(r.mu);
+  auto it = r.streams.find({allocator, device_ordinal});
+  return it == r.streams.end() ? nullptr : it->second;
+}
+
+std::string StreamLabel(se::Stream* stream) {
+  if (stream == nullptr) return "<null>";
+  return absl::StrFormat("%p(%s)", stream, stream->GetName());
+}
+
+}  // namespace
+
+Mode GetMode() {
+  static const Mode mode = [] {
+    const char* v = std::getenv("XLA_PJRT_BUFFER_LIFETIME_CHECK");
+    if (v == nullptr) return Mode::kOff;
+    absl::string_view s(v);
+    if (s == "fatal") return Mode::kFatal;
+    if (s == "log" || s == "1") return Mode::kLog;
+    return Mode::kOff;
+  }();
+  return mode;
+}
+
+absl::Duration Lag() {
+  static const absl::Duration lag = [] {
+    const char* v = std::getenv("XLA_PJRT_BUFFER_LIFETIME_CHECK_LAG_US");
+    return v == nullptr ? absl::ZeroDuration()
+                        : absl::Microseconds(std::strtoll(v, nullptr, 10));
+  }();
+  return lag;
+}
+
+void RegisterAllocatorStream(const se::DeviceAddressAllocator* allocator,
+                             int device_ordinal, se::Stream* stream) {
+  Registry& r = GetRegistry();
+  absl::MutexLock lock(r.mu);
+  r.streams[{allocator, device_ordinal}] = stream;
+}
+
+int64_t ViolationCount() { return violations.load(); }
+
+}  // namespace buffer_lifetime_check
 
 ShapedBuffer RawSEDeviceMemory::AsShapedBuffer(
     PjRtDevice* device, const Shape& on_device_shape) const {
@@ -77,6 +151,10 @@ class AllocatedRawSEDeviceMemory : public RawSEDeviceMemory {
   }
 
   ~AllocatedRawSEDeviceMemory() override {
+    if (allocator_ &&
+        buffer_lifetime_check::GetMode() != buffer_lifetime_check::Mode::kOff) {
+      CheckUsesBeforeFree();
+    }
     if (allocator_) {
       absl::Status status = allocator_->Deallocate(
           local_device_->local_device_id().value(), mem());
@@ -88,6 +166,16 @@ class AllocatedRawSEDeviceMemory : public RawSEDeviceMemory {
 
   void UnsafeReleaseMemory() override { allocator_ = nullptr; }
 
+  void RecordUse(se::Stream* stream, BufferSequencingEventRef event,
+                 absl::string_view user) override {
+    if (!event) return;
+    absl::MutexLock lock(uses_mu_);
+    uses_.erase(std::remove_if(uses_.begin(), uses_.end(),
+                               [](const Use& u) { return u.event.IsAvailable(); }),
+                uses_.end());
+    uses_.push_back({stream, std::move(event), std::string(user)});
+  }
+
   absl::StatusOr<BufferSequencingEventRef> GetDefinitionEvent(
       AsyncWorkRunner* async_work_runner, bool nullptr_if_past) const override {
     if (sync_point_ != std::numeric_limits<size_t>::max()) {
@@ -98,9 +186,45 @@ class AllocatedRawSEDeviceMemory : public RawSEDeviceMemory {
   }
 
  private:
+  struct Use {
+    se::Stream* stream;
+    BufferSequencingEventRef event;
+    std::string user;
+  };
+
+  void CheckUsesBeforeFree() {
+    int ordinal = local_device_->local_device_id().value();
+    se::Stream* home =
+        buffer_lifetime_check::HomeStream(allocator_, ordinal);
+    if (home == nullptr) return;
+    absl::MutexLock lock(uses_mu_);
+    for (const Use& u : uses_) {
+      if (u.stream == home || u.event.IsAvailable()) continue;
+      int64_t n = ++buffer_lifetime_check::violations;
+      std::string msg = absl::StrFormat(
+          "buffer lifetime violation #%d: device buffer %p (%d bytes) is being "
+          "freed on its allocator's stream %s while a use on stream %s by %s "
+          "has not completed and nothing orders the free after it",
+          n, mem().opaque(), mem().size(),
+          buffer_lifetime_check::StreamLabel(home),
+          buffer_lifetime_check::StreamLabel(u.stream), u.user);
+      if (buffer_lifetime_check::GetMode() ==
+          buffer_lifetime_check::Mode::kFatal) {
+        LOG(FATAL) << msg << "\nfree stack:\n" << tsl::CurrentStackTrace();
+      }
+      if (n <= 20) {
+        LOG(ERROR) << msg << "\nfree stack:\n" << tsl::CurrentStackTrace();
+      } else if (n % 1000 == 0) {
+        LOG(ERROR) << msg << " (" << n << " violations so far)";
+      }
+    }
+  }
+
   se::DeviceAddressAllocator* allocator_;
   LocalDeviceState* local_device_;
   size_t sync_point_ = std::numeric_limits<size_t>::max();
+  absl::Mutex uses_mu_;
+  std::vector<Use> uses_ ABSL_GUARDED_BY(uses_mu_);
 };
 
 tsl::AsyncValueRef<RawSEDeviceMemory> RawSEDeviceMemory::Create(
@@ -147,6 +271,11 @@ class SlicedRawSEDeviceMemory : public RawSEDeviceMemory {
 
   void UnsafeReleaseMemory() override {
     LOG(FATAL) << "SlicedRawSEDeviceMemory cannot be donated.";
+  }
+
+  void RecordUse(se::Stream* stream, BufferSequencingEventRef event,
+                 absl::string_view user) override {
+    if (base_.IsAvailable()) base_->RecordUse(stream, std::move(event), user);
   }
 
  private:

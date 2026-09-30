@@ -30,7 +30,9 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
 #include "xla/pjrt/async_work_runner.h"
@@ -46,11 +48,24 @@ limitations under the License.
 #include "xla/shape_tree.h"
 #include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/device_address_allocator.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/threadpool.h"
 
 namespace xla {
+
+namespace buffer_lifetime_check {
+
+enum class Mode { kOff, kLog, kFatal };
+
+Mode GetMode();
+absl::Duration Lag();
+void RegisterAllocatorStream(const se::DeviceAddressAllocator* allocator,
+                             int device_ordinal, se::Stream* stream);
+int64_t ViolationCount();
+
+}  // namespace buffer_lifetime_check
 
 class RawSEDeviceMemory {
  public:
@@ -90,6 +105,9 @@ class RawSEDeviceMemory {
       AsyncWorkRunner* async_work_runner, bool nullptr_if_past) const {
     return BufferSequencingEventRef();
   }
+
+  virtual void RecordUse(se::Stream* stream, BufferSequencingEventRef event,
+                         absl::string_view user) {}
 
  private:
   se::DeviceAddressBase value_;

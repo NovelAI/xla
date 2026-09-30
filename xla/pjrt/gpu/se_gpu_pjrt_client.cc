@@ -1484,14 +1484,25 @@ GetStreamExecutorGpuDeviceAllocator(
              device->compute_stream(),
              /*memory_space=*/static_cast<int>(se::MemorySpace::kHost)});
       }
-      execution_stream_allocators->push_back(
-          std::make_unique<se::MultiDeviceAdapter>(
-              platform, std::move(stream_allocators)));
+      auto adapter = std::make_unique<se::MultiDeviceAdapter>(
+          platform, std::move(stream_allocators));
+      for (const auto& ordinal_and_device : addressable_devices) {
+        buffer_lifetime_check::RegisterAllocatorStream(
+            adapter.get(), ordinal_and_device.first,
+            ordinal_and_device.second->execution_stream(i));
+      }
+      execution_stream_allocators->push_back(std::move(adapter));
     }
   }
 #endif
-  return std::make_unique<se::MultiDeviceAdapter>(platform,
-                                                  std::move(allocators));
+  auto adapter =
+      std::make_unique<se::MultiDeviceAdapter>(platform, std::move(allocators));
+  for (const auto& ordinal_and_device : addressable_devices) {
+    buffer_lifetime_check::RegisterAllocatorStream(
+        adapter.get(), ordinal_and_device.first,
+        ordinal_and_device.second->compute_stream());
+  }
+  return adapter;
 }
 
 // Name the devices and threads that launch work on them. Note: the launcher

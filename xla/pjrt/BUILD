@@ -833,6 +833,7 @@ cc_library(
     ],
     visibility = internal_visibility(["//xla:friends"]),
     deps = [
+        "@tsl//tsl/platform:stacktrace",
         ":async_work_runner",
         ":common_pjrt_client",
         ":device_event",

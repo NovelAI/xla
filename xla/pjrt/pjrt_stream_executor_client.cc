@@ -1950,6 +1950,12 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
       }
     }
 
+    if (absl::Duration lag = buffer_lifetime_check::Lag();
+        lag > absl::ZeroDuration()) {
+      exec_stream->DoHostCallback([lag] { absl::SleepFor(lag); })
+          .IgnoreError();
+    }
+
     absl::StatusOr<PjRtStreamExecutorExecutionOutput> result_buffer_or_status;
     if (predetermined_error.ok()) {
       result_buffer_or_status =
@@ -2050,6 +2056,21 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
           kExecutableName, std::string(executable->executable()->name()));
       return PjRtDeviceEventRef(*std::move(definition_event_or));
     }();
+    if (buffer_lifetime_check::GetMode() !=
+            buffer_lifetime_check::Mode::kOff &&
+        result_buffer_or_status.ok()) {
+      if (auto ev = definition_event.down_cast<BufferSequencingEvent>()) {
+        absl::string_view user = executable->executable()->name();
+        for (auto* nodes : {&inputs, &results}) {
+          for (auto& node : *nodes) {
+            auto& mem = tensorflow::down_cast<PjRtStreamExecutorRawBuffer*>(
+                            node.get())
+                            ->device_buffer();
+            if (mem.IsConcrete()) mem->RecordUse(exec_stream, ev.CopyRef(), user);
+          }
+        }
+      }
+    }
     if ((device_state->allocation_model() == LocalDeviceState::kSynchronous ||
          exec_stream != device_state->compute_stream()) &&
         result_buffer_or_status.ok()) {
