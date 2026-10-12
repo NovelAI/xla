@@ -576,7 +576,7 @@ PJRT_Error* PJRT_Gpu_Autotune_Serialize_Impl(
           ? xla::gpu::AutotunerCache::SerializeFilter::kUsedOnly
           : xla::gpu::AutotunerCache::SerializeFilter::kAll);
   if (!result.ok()) {
-    return new PJRT_Error{result.status()};
+    return pjrt::StatusToPjRtError(result.status());
   }
   serialized = std::move(*result);
   args->out_data = serialized.data();
@@ -593,7 +593,7 @@ PJRT_Error* PJRT_Gpu_Autotune_Load_Impl(
       absl::string_view(args->data, args->data_size), args->as_textproto,
       args->allow_override);
   if (!status.ok()) {
-    return new PJRT_Error{std::move(status)};
+    return pjrt::StatusToPjRtError(std::move(status));
   }
   return nullptr;
 }
